@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Story Dubbing Workbench</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">S</span>
+          <div>
+            <h1>Story Dubbing Workbench</h1>
+            <p id="statusText">Ready</p>
+          </div>
+        </div>
+        <form id="runForm" class="run-form">
+          <input id="youtubeUrl" type="url" placeholder="https://www.youtube.com/watch?v=..." required />
+          <button type="submit" class="primary">开始</button>
+          <button id="pauseToggle" type="button" disabled>暂停</button>
+        </form>
+      </header>
+
+      <main class="workspace">
+        <aside class="rail">
+          <ol id="steps">
+            <li data-step="download">下载</li>
+            <li data-step="translate">翻译断句</li>
+            <li data-step="segment">角色音色</li>
+            <li data-step="tts">配音</li>
+            <li data-step="compose">混音合成</li>
+            <li data-step="ready">导出</li>
+          </ol>
+          <section class="status-panel">
+            <h2>任务</h2>
+            <div id="taskId">未开始</div>
+            <div id="taskStep">等待链接</div>
+          </section>
+        </aside>
+
+        <section class="main-panel">
+          <nav class="tabs" aria-label="工作区视图">
+            <button class="tab active" data-tab="subtitles" type="button">字幕与断句</button>
+            <button class="tab" data-tab="roles" type="button">角色与音色</button>
+            <button class="tab" data-tab="prompt" type="button">翻译/Prompt</button>
+            <button class="tab" data-tab="export" type="button">导出预览</button>
+            <button class="tab" data-tab="settings" type="button">设置</button>
+          </nav>
+
+          <section id="subtitles" class="tab-page active">
+            <div class="toolbar">
+              <button id="saveCues" type="button">保存字幕修改</button>
+              <span id="cueCount">0 cues</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>源行</th>
+                    <th>英文源文</th>
+                    <th>时间</th>
+                    <th>中文文本</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="cueTable"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section id="roles" class="tab-page">
+            <div class="toolbar">
+              <button id="applyNarratorVoice" type="button">旁白统一音色</button>
+              <button id="regenerateAllTts" type="button">全部重配</button>
+              <select id="bulkVoice"></select>
+              <audio id="previewAudio" controls></audio>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>角色</th>
+                    <th>类型</th>
+                    <th>音色</th>
+                    <th>文本</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="roleTable"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section id="prompt" class="tab-page">
+            <div class="form-grid">
+              <label>翻译引擎
+                <select id="translationEngine">
+                  <option value="google">Google Translate</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="glm">GLM</option>
+                  <option value="qwenmt">QwenMT</option>
+                  <option value="openai-compatible">OpenAI-compatible</option>
+                </select>
+              </label>
+              <label>LLM 提供商
+                <select id="llmProvider">
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="glm">GLM</option>
+                  <option value="openai-compatible">OpenAI-compatible</option>
+                </select>
+              </label>
+              <label>模型
+                <input id="llmModel" type="text" />
+              </label>
+              <label>Base URL
+                <input id="llmBaseUrl" type="url" />
+              </label>
+              <label>API Key
+                <div class="secret-field">
+                  <input id="llmApiKey" type="password" autocomplete="off" />
+                  <button class="secret-toggle" data-target="llmApiKey" type="button">显示</button>
+                  <button id="testLlmConnection" type="button">测试连接</button>
+                </div>
+                <span id="llmTestState" class="field-state"></span>
+              </label>
+              <label>Temperature
+                <input id="temperature" type="number" min="0" max="2" step="0.1" />
+              </label>
+              <label>最大输出
+                <input id="maxTokens" type="number" min="256" step="256" />
+              </label>
+            </div>
+            <label class="stacked">System Prompt
+              <textarea id="systemPrompt" rows="8"></textarea>
+            </label>
+            <label class="stacked">User Prompt Template
+              <textarea id="userPromptTemplate" rows="10"></textarea>
+            </label>
+            <div class="toolbar">
+              <button id="saveSettings" type="button" class="primary">保存设置</button>
+              <span id="settingsState"></span>
+            </div>
+          </section>
+
+          <section id="export" class="tab-page">
+            <div class="export-grid">
+              <div>
+                <h2>最终视频</h2>
+                <a id="finalVideo" href="#" target="_blank">尚未生成</a>
+              </div>
+              <div>
+                <h2>工作目录</h2>
+                <code id="workDir">-</code>
+              </div>
+            </div>
+            <pre id="manifestJson">{}</pre>
+          </section>
+
+          <section id="settings" class="tab-page">
+            <div class="form-grid">
+              <label>字幕模式
+                <select id="subtitleMode">
+                  <option value="hard">硬字幕</option>
+                  <option value="soft">软字幕</option>
+                </select>
+              </label>
+              <label>目标语言
+                <input id="targetLanguageCode" type="text" />
+              </label>
+              <label>Qwen 默认音色
+                <select id="qwenDefaultVoice"></select>
+              </label>
+              <label>Qwen TTS Key
+                <div class="secret-field">
+                  <input id="qwenTtsKey" type="password" autocomplete="off" />
+                  <button class="secret-toggle" data-target="qwenTtsKey" type="button">显示</button>
+                  <button id="testQwenConnection" type="button">测试连接</button>
+                </div>
+                <span id="qwenTestState" class="field-state"></span>
+              </label>
+              <label>Qwen TTS 模型
+                <input id="qwenTtsModel" type="text" />
+              </label>
+              <label>Qwen TTS Type
+                <input id="qwenTtsType" type="number" min="1" />
+              </label>
+              <label>BGM 音量
+                <input id="bgmVolume" type="number" min="0" max="1" step="0.05" />
+              </label>
+              <label>YouTube cookies-from-browser
+                <input id="youtubeCookiesFromBrowser" type="text" placeholder="chrome:Default 或 edge:Default" />
+              </label>
+              <label>YouTube cookies.txt 路径
+                <input id="youtubeCookiesFile" type="text" placeholder="D:\cookies\youtube.txt" />
+              </label>
+              <label>YouTube player client
+                <input id="youtubePlayerClient" type="text" placeholder="mweb / web / ios，留空默认" />
+              </label>
+              <label>YouTube PO Token
+                <input id="youtubePoToken" type="password" autocomplete="off" placeholder="mweb.gvs+... 或 token 本体" />
+              </label>
+              <label>YouTube proxy
+                <input id="youtubeProxy" type="text" placeholder="http://127.0.0.1:7897" />
+              </label>
+              <label>本地高清视频路径
+                <input id="localVideoPath" type="text" placeholder="D:\Videos\story.mp4" />
+              </label>
+              <label>本地英文字幕路径
+                <input id="localSubtitlePath" type="text" placeholder="D:\Videos\story.en.srt" />
+              </label>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
