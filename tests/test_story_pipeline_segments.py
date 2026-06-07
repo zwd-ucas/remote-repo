@@ -1,5 +1,35 @@
+import json
+
 from videotrans.story_pipeline.story_segments import normalize_story_cues
 from videotrans.story_pipeline.types import SrtItem
+
+
+def test_review_reattributes_speaker_and_inherits_cast_voice(monkeypatch):
+    # The speaker-review pass must fix a mis-attributed line and give it the speaker's
+    # established (cast-majority) voice — so a character's line never stays in the wrong
+    # voice. (The troll's quote had been left in the narrator's voice.)
+    from videotrans.story_pipeline import pipeline
+    from videotrans.story_pipeline.settings import StoryPipelineSettings
+
+    raw = [
+        {"source_lines": [1], "speaker": "巨魔", "voice": "诡婆婆(Ebona)", "zh_text": "是谁在我桥上？", "instruction": "凶"},
+        {"source_lines": [2], "speaker": "旁白", "voice": "苏瑶(Serena)", "zh_text": "我要吃掉你！", "instruction": "凶"},
+    ]
+    # LLM judges line 2's quote actually belongs to the troll, not the narrator.
+    monkeypatch.setattr(
+        pipeline,
+        "call_llm_chat",
+        lambda *a, **k: json.dumps(
+            [
+                {"source_lines": [1], "speaker": "巨魔", "zh_text": "是谁在我桥上？", "instruction": "凶"},
+                {"source_lines": [2], "speaker": "巨魔", "zh_text": "我要吃掉你！", "instruction": "凶"},
+            ]
+        ),
+    )
+    out = pipeline.default_review(raw, StoryPipelineSettings(), lambda _t: None)
+    assert out[1]["speaker"] == "巨魔"
+    assert out[1]["voice"] == "诡婆婆(Ebona)"  # inherits the troll's cast voice, not the narrator's
+    assert out[1]["speaker_type"] == "character"
 
 
 def _srt(line, start, end, text):
@@ -155,7 +185,7 @@ def test_same_speaker_valid_voice_is_not_overridden_by_role_recommendation():
             "source_lines": [1],
             "speaker": "王子",
             "speaker_type": "character",
-            "voice": "凯(Kai)",
+            "voice": "月白(Moon)",
             "zh_text": "王子打开了城门。",
         },
         {
@@ -175,7 +205,9 @@ def test_same_speaker_valid_voice_is_not_overridden_by_role_recommendation():
     )
 
     assert issues == []
-    assert [cue.voice for cue in cues] == ["凯(Kai)", "月白(Moon)"]
+    # The LLM's valid choice (月白) is kept for the whole character — not replaced by the
+    # default/role-recommended 凯 — and stays consistent across the character's lines.
+    assert [cue.voice for cue in cues] == ["月白(Moon)", "月白(Moon)"]
 
 
 def test_witch_role_valid_voice_is_prompt_guidance_not_hard_override():

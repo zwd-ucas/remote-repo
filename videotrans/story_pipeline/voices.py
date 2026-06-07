@@ -301,15 +301,16 @@ QWEN_VOICE_DETAILS: dict[str, dict[str, Any]] = {
 
 
 ROLE_VOICE_RECOMMENDATIONS: dict[str, list[str]] = {
-    "旁白": ["沧明子(Eldric Sage)", "小婉(Seren)", "苏瑶(Serena)"],
+    "旁白": ["苏瑶(Serena)", "小婉(Seren)", "四月(Maia)"],
     "小美人鱼/小女孩/公主": ["萌宝(Bella)", "乖小妹(Mia)", "少女阿月(Stella)", "芊悦(Cherry)"],
-    "王子/年轻男主": ["凯(Kai)", "月白(Moon)", "晨煦(Ethan)", "安德雷(Andre)"],
+    "王子/年轻男主": ["凯(Kai)", "月白(Moon)", "晨煦(Ethan)"],
     "国王/智者/老者": ["沧明子(Eldric Sage)", "徐大爷(Arthur)"],
     "父亲/猎人/粗犷男子": ["田叔(Vincent)"],
     "母亲/王后/善良女性长辈": ["苏瑶(Serena)", "小婉(Seren)", "四月(Maia)"],
     "小男孩": ["顽屁小孩(Pip)", "沙小弥(Mochi)"],
-    "小动物/小精灵": ["萌小姬(Bunny)", "茉兔(Momo)", "小野杏(Ono Anna)"],
-    "女巫/恶毒王后/恶毒后妈": ["诡婆婆(Ebona)", "卡捷琳娜(Katerina)", "燕铮莺(Bellona)"],
+    "小动物/小精灵": ["萌小姬(Bunny)", "茉兔(Momo)"],
+    "女巫/恶毒王后/恶毒后妈": ["诡婆婆(Ebona)", "燕铮莺(Bellona)"],
+    "巨魔/怪物/凶恶男性反派": ["田叔(Vincent)", "沧明子(Eldric Sage)", "徐大爷(Arthur)"],
     "老巫师/黑暗智者": ["沧明子(Eldric Sage)"],
     "搞笑路人/商人/小丑": ["田叔(Vincent)", "顽屁小孩(Pip)", "茉兔(Momo)"],
 }
