@@ -18,6 +18,9 @@ class StoryCue:
     zh_text: str
     confidence: float = 0.0
     needs_review: bool = False
+    # Natural-language delivery direction for qwen3-tts-instruct (emotion + tone +
+    # pace), e.g. "凶狠低沉、气势汹汹、语速偏慢". Empty falls back to a default per voice.
+    instruction: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -133,9 +136,34 @@ def normalize_story_cues(
                 zh_text=text,
                 confidence=confidence,
                 needs_review=_speaker_needs_review(text),
+                instruction=str(raw.get("instruction") or "").strip(),
             )
         )
+    cues = _enforce_speaker_voice_consistency(cues)
     return _rebalance_internal_splits(cues, source_subtitles), issues
+
+
+def _enforce_speaker_voice_consistency(cues: list[StoryCue]) -> list[StoryCue]:
+    """Guarantee one voice per character across the whole video.
+
+    The LLM segments in independent chunks and can pick a different voice for the same
+    speaker in each chunk (e.g. the troll). Pick each speaker's majority voice (ties →
+    first seen) and apply it to every one of that speaker's lines, so a character never
+    switches voice mid-story.
+    """
+    from collections import Counter
+
+    votes: dict[str, Counter] = {}
+    for cue in cues:
+        if not cue.zh_text.strip():
+            continue
+        votes.setdefault(cue.speaker, Counter())[cue.voice] += 1
+    canonical = {speaker: counter.most_common(1)[0][0] for speaker, counter in votes.items() if counter}
+    for cue in cues:
+        chosen = canonical.get(cue.speaker)
+        if chosen:
+            cue.voice = chosen
+    return cues
 
 
 def _extract_role_voice_prefix(text: str) -> tuple[str, str, str] | None:
@@ -173,29 +201,31 @@ def _bounded_time(value: Any, start: int, end: int, fallback: int) -> int:
 
 
 def _rebalance_internal_splits(cues: Sequence[StoryCue], source_subtitles: Sequence[SrtItem]) -> list[StoryCue]:
-    by_line = {int(_item_get(item, "line")): item for item in source_subtitles}
     result = [StoryCue(**cue.to_dict()) for cue in cues]
-    groups: dict[int, list[int]] = {}
+    # Group ALL cues that share the same source_lines (single OR multi line). Several
+    # cues bound to the same English line(s) — e.g. a "xxx说道" attribution split from
+    # its quoted line — must be spread across that shared window, otherwise they keep
+    # identical (often zero-width) timings and collapse onto the same instant.
+    groups: dict[tuple[int, ...], list[int]] = {}
     for idx, cue in enumerate(result):
-        if len(cue.source_lines) == 1:
-            groups.setdefault(cue.source_lines[0], []).append(idx)
+        groups.setdefault(tuple(cue.source_lines), []).append(idx)
 
-    for line, indexes in groups.items():
-        if len(indexes) <= 1 or line not in by_line:
+    for lines, indexes in groups.items():
+        if len(indexes) <= 1 or not lines:
             continue
-        source = by_line[line]
-        source_start = int(_item_get(source, "start_time", 0))
-        source_end = int(_item_get(source, "end_time", 0))
-        duration = max(1, source_end - source_start)
+        # Parent window = the span the group already covers (first line start .. last line end).
+        window_start = min(result[idx].start_ms for idx in indexes)
+        window_end = max(result[idx].end_ms for idx in indexes)
+        duration = max(1, window_end - window_start)
         weights = [max(1, len(re.sub(r"\s+", "", result[idx].zh_text))) for idx in indexes]
         total = sum(weights)
-        cursor = source_start
+        cursor = window_start
         for pos, idx in enumerate(indexes):
             if pos == len(indexes) - 1:
-                next_time = source_end
+                next_time = window_end
             else:
-                next_time = source_start + round(duration * sum(weights[: pos + 1]) / total)
-                next_time = max(cursor + 1, min(next_time, source_end - (len(indexes) - pos - 1)))
+                next_time = window_start + round(duration * sum(weights[: pos + 1]) / total)
+                next_time = max(cursor + 1, min(next_time, window_end - (len(indexes) - pos - 1)))
             result[idx].start_ms = cursor
             result[idx].end_ms = next_time
             cursor = next_time
