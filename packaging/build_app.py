@@ -83,6 +83,10 @@ def main() -> None:
 
     runtime = out / "runtime"
     shutil.copytree(uv_managed_python(PY_VERSION), runtime, symlinks=True)
+    # uv marks its managed Pythons EXTERNALLY-MANAGED (PEP 668) so they can't be modified.
+    # This copy is our own standalone runtime, so clear the marker to install into it.
+    for marker in runtime.rglob("EXTERNALLY-MANAGED"):
+        marker.unlink()
     py = runtime_python(runtime)
 
     run(["uv", "pip", "install", "--python", py, "--upgrade", "pip", "wheel"])
