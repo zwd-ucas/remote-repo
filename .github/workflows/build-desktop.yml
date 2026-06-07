@@ -1,0 +1,84 @@
+name: Build desktop apps
+
+# Builds the installers entirely in CI — no local build needed.
+#   - macOS (Apple Silicon): StoryDubbing-<ver>-macos-arm64.dmg
+#   - Windows (CPU):         StoryDubbing-<ver>-win-cpu.exe
+#   - Windows (CUDA):        StoryDubbing-<ver>-win-cuda.exe  (NVIDIA GPU acceleration)
+# Trigger manually (Actions tab -> Run workflow) or push a tag like v1.0.0 to also
+# publish a GitHub Release with the installers attached.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: macos, variant: cpu, label: macOS (Apple Silicon) }
+          - { os: windows-latest, target: windows, variant: cpu, label: Windows (CPU) }
+          - { os: windows-latest, target: windows, variant: cuda, label: Windows (CUDA) }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Compute version
+        id: ver
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then V="${GITHUB_REF_NAME#v}"; else V="1.0.0-dev"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Building version $V (${{ matrix.variant }})"
+
+      - name: Build payload (standalone Python + deps + node)
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" packaging/build_app.py --out dist/payload --variant ${{ matrix.variant }}
+
+      - name: Package macOS app + dmg
+        if: matrix.target == 'macos'
+        run: bash packaging/macos/make_app.sh dist/payload "${{ steps.ver.outputs.version }}" dist
+
+      - name: Install Inno Setup
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Package Windows installer
+        if: matrix.target == 'windows'
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.ver.outputs.version }}
+          APP_VARIANT: ${{ matrix.variant }}
+          PAYLOAD_DIR: ${{ github.workspace }}\dist\payload
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /O"${{ github.workspace }}\dist" packaging\windows\installer.iss
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: StoryDubbing-${{ matrix.target == 'macos' && 'macos-arm64' || format('win-{0}', matrix.variant) }}
+          path: |
+            dist/*.dmg
+            dist/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Attach to release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.dmg
+            dist/*.exe
