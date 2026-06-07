@@ -13,8 +13,6 @@
 
 test.py
 .agree.txt
-.git
-.github
 .idea
 .venv
 .pytest_cache
@@ -71,3 +69,4 @@ runtime
 ehthumbs.db
 Thumbs.db
 
+.playwright-mcp/

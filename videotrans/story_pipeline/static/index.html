@@ -9,49 +9,102 @@
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <div class="brand">
+        <div class="brand" data-view="dashboard">
           <span class="brand-mark">S</span>
           <div>
             <h1>Story Dubbing Workbench</h1>
-            <p id="statusText">Ready</p>
+            <p id="globalStatus">就绪</p>
           </div>
         </div>
-        <form id="runForm" class="run-form">
-          <input id="youtubeUrl" type="url" placeholder="https://www.youtube.com/watch?v=..." required />
-          <button type="submit" class="primary">开始</button>
-          <button id="pauseToggle" type="button" disabled>暂停</button>
-        </form>
+        <nav class="topnav">
+          <button class="navbtn active" data-view="dashboard" type="button">仪表盘</button>
+          <button class="navbtn" data-view="settings" type="button">设置</button>
+        </nav>
       </header>
 
-      <main class="workspace">
-        <aside class="rail">
-          <ol id="steps">
+      <main class="main">
+        <!-- ============ DASHBOARD ============ -->
+        <section id="view-dashboard" class="view active">
+          <div class="hero">
+            <h2 class="hero-title">把 YouTube 故事配成中文配音</h2>
+            <p class="hero-sub">粘贴一个或多个链接，自动模式一键直出，手动模式逐句精修。</p>
+            <textarea
+              id="urlInput"
+              class="url-input"
+              rows="3"
+              placeholder="https://www.youtube.com/watch?v=...&#10;每行一个链接，可一次粘贴多个（将按顺序串行处理）"
+            ></textarea>
+            <div class="hero-controls">
+              <div class="mode-cards">
+                <label class="mode-card">
+                  <input type="radio" name="mode" value="auto" checked />
+                  <div class="mode-text"><strong>自动模式</strong><span>链接 → 成片，全程无需人工</span></div>
+                </label>
+                <label class="mode-card">
+                  <input type="radio" name="mode" value="manual" />
+                  <div class="mode-text"><strong>手动模式</strong><span>每个视频暂停确认，可改时间轴 / 音色 / 字幕</span></div>
+                </label>
+              </div>
+              <button id="startBtn" class="primary big" type="button">开始配音</button>
+            </div>
+            <p id="dashHint" class="hint"></p>
+          </div>
+
+          <div class="queue-section">
+            <div class="section-head">
+              <h3>任务队列</h3>
+              <span id="queueCount" class="muted"></span>
+            </div>
+            <div id="queueList" class="queue-list">
+              <p class="empty">还没有任务，粘贴链接开始。</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ TASK DETAIL ============ -->
+        <section id="view-task" class="view">
+          <div class="task-bar">
+            <button id="backBtn" class="ghost" type="button">← 返回队列</button>
+            <div class="task-id">
+              <strong id="tTitle">任务</strong>
+              <span id="tMode" class="badge mode"></span>
+              <span id="tBadge" class="badge"></span>
+            </div>
+            <div class="task-actions">
+              <button id="confirmBtn" class="primary" type="button" hidden>确认并生成视频</button>
+              <button id="taskPause" type="button" hidden>暂停</button>
+              <button id="taskCancel" class="danger" type="button" hidden>取消</button>
+            </div>
+          </div>
+
+          <ol id="steps" class="steps">
             <li data-step="download">下载</li>
             <li data-step="translate">翻译断句</li>
             <li data-step="segment">角色音色</li>
+            <li data-step="awaiting_review">待确认</li>
             <li data-step="tts">配音</li>
             <li data-step="compose">混音合成</li>
             <li data-step="ready">导出</li>
           </ol>
-          <section class="status-panel">
-            <h2>任务</h2>
-            <div id="taskId">未开始</div>
-            <div id="taskStep">等待链接</div>
-          </section>
-        </aside>
+          <div id="taskProgress" class="task-progress" hidden>
+            <div class="task-progress-bar"><div id="taskProgressFill" class="task-progress-fill"></div></div>
+            <span id="taskProgressPct" class="task-progress-pct"></span>
+          </div>
+          <p id="taskStepText" class="muted"></p>
 
-        <section class="main-panel">
-          <nav class="tabs" aria-label="工作区视图">
+          <div id="reviewBanner" class="review-banner" hidden>
+            手动模式：请核对并修改下面的时间轴、音色、字幕，满意后点「确认并生成视频」继续配音与合成。
+          </div>
+
+          <nav class="tabs" id="taskTabs" aria-label="任务视图">
             <button class="tab active" data-tab="subtitles" type="button">字幕与断句</button>
             <button class="tab" data-tab="roles" type="button">角色与音色</button>
-            <button class="tab" data-tab="prompt" type="button">翻译/Prompt</button>
             <button class="tab" data-tab="export" type="button">导出预览</button>
-            <button class="tab" data-tab="settings" type="button">设置</button>
           </nav>
 
           <section id="subtitles" class="tab-page active">
             <div class="toolbar">
-              <button id="saveCues" type="button">保存字幕修改</button>
+              <button id="saveCues" type="button">保存修改</button>
               <span id="cueCount">0 cues</span>
             </div>
             <div class="table-wrap">
@@ -60,7 +113,7 @@
                   <tr>
                     <th>源行</th>
                     <th>英文源文</th>
-                    <th>时间</th>
+                    <th>时间 (ms)</th>
                     <th>中文文本</th>
                     <th>状态</th>
                     <th>操作</th>
@@ -94,17 +147,37 @@
             </div>
           </section>
 
-          <section id="prompt" class="tab-page">
+          <section id="export" class="tab-page">
+            <div class="export-grid">
+              <div>
+                <h2>最终视频</h2>
+                <video id="finalVideoPlayer" class="final-video" controls playsinline></video>
+                <p><a id="finalVideo" class="download-btn" href="#" download>尚未生成</a></p>
+                <code id="finalVideoPath" class="muted">-</code>
+                <p id="savedPathLine" class="muted" hidden>已保存到：<code id="savedPath"></code></p>
+              </div>
+              <div>
+                <h2>工作目录</h2>
+                <code id="workDir">-</code>
+              </div>
+            </div>
+            <pre id="manifestJson">{}</pre>
+          </section>
+        </section>
+
+        <!-- ============ SETTINGS ============ -->
+        <section id="view-settings" class="view">
+          <div class="settings-head">
+            <h2>设置</h2>
+            <div class="toolbar">
+              <button id="saveSettings" type="button" class="primary">保存设置</button>
+              <span id="settingsState" class="muted"></span>
+            </div>
+          </div>
+
+          <div class="settings-card">
+            <h3>API 与模型</h3>
             <div class="form-grid">
-              <label>翻译引擎
-                <select id="translationEngine">
-                  <option value="google">Google Translate</option>
-                  <option value="deepseek">DeepSeek</option>
-                  <option value="glm">GLM</option>
-                  <option value="qwenmt">QwenMT</option>
-                  <option value="openai-compatible">OpenAI-compatible</option>
-                </select>
-              </label>
               <label>LLM 提供商
                 <select id="llmProvider">
                   <option value="deepseek">DeepSeek</option>
@@ -115,52 +188,66 @@
               <label>模型
                 <input id="llmModel" type="text" />
               </label>
+              <label>分句模型（更精炼）
+                <input id="llmSegmentModel" type="text" placeholder="deepseek-chat" />
+              </label>
+              <label>思考强度
+                <select id="llmReasoningEffort">
+                  <option value="">关闭</option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high（最高）</option>
+                </select>
+              </label>
               <label>Base URL
                 <input id="llmBaseUrl" type="url" />
               </label>
-              <label>API Key
+              <label>LLM API Key
                 <div class="secret-field">
                   <input id="llmApiKey" type="password" autocomplete="off" />
                   <button class="secret-toggle" data-target="llmApiKey" type="button">显示</button>
-                  <button id="testLlmConnection" type="button">测试连接</button>
+                  <button id="testLlmConnection" type="button">测试</button>
                 </div>
                 <span id="llmTestState" class="field-state"></span>
               </label>
               <label>Temperature
                 <input id="temperature" type="number" min="0" max="2" step="0.1" />
               </label>
-              <label>最大输出
+              <label>最大输出 tokens
                 <input id="maxTokens" type="number" min="256" step="256" />
               </label>
+              <label>翻译引擎
+                <select id="translationEngine">
+                  <option value="google">Google Translate</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="glm">GLM</option>
+                  <option value="qwenmt">QwenMT</option>
+                  <option value="openai-compatible">OpenAI-compatible</option>
+                </select>
+              </label>
+              <label>Qwen 默认音色
+                <select id="qwenDefaultVoice"></select>
+              </label>
+              <label>Qwen TTS Key
+                <div class="secret-field">
+                  <input id="qwenTtsKey" type="password" autocomplete="off" />
+                  <button class="secret-toggle" data-target="qwenTtsKey" type="button">显示</button>
+                  <button id="testQwenConnection" type="button">测试</button>
+                </div>
+                <span id="qwenTestState" class="field-state"></span>
+              </label>
+              <label>Qwen TTS 模型
+                <input id="qwenTtsModel" type="text" />
+              </label>
             </div>
-            <label class="stacked">System Prompt
-              <textarea id="systemPrompt" rows="8"></textarea>
-            </label>
-            <label class="stacked">User Prompt Template
-              <textarea id="userPromptTemplate" rows="10"></textarea>
-            </label>
-            <div class="toolbar">
-              <button id="saveSettings" type="button" class="primary">保存设置</button>
-              <span id="settingsState"></span>
-            </div>
-          </section>
+          </div>
 
-          <section id="export" class="tab-page">
-            <div class="export-grid">
-              <div>
-                <h2>最终视频</h2>
-                <a id="finalVideo" href="#" target="_blank">尚未生成</a>
-              </div>
-              <div>
-                <h2>工作目录</h2>
-                <code id="workDir">-</code>
-              </div>
-            </div>
-            <pre id="manifestJson">{}</pre>
-          </section>
-
-          <section id="settings" class="tab-page">
+          <div class="settings-card">
+            <h3>输出与字幕</h3>
             <div class="form-grid">
+              <label class="span-2">成片保存路径（output_dir）
+                <input id="outputDir" type="text" placeholder="留空只存到任务工作目录；填写后成片会复制到这里" />
+              </label>
               <label>字幕模式
                 <select id="subtitleMode">
                   <option value="hard">硬字幕</option>
@@ -170,49 +257,58 @@
               <label>目标语言
                 <input id="targetLanguageCode" type="text" />
               </label>
-              <label>Qwen 默认音色
-                <select id="qwenDefaultVoice"></select>
-              </label>
-              <label>Qwen TTS Key
-                <div class="secret-field">
-                  <input id="qwenTtsKey" type="password" autocomplete="off" />
-                  <button class="secret-toggle" data-target="qwenTtsKey" type="button">显示</button>
-                  <button id="testQwenConnection" type="button">测试连接</button>
-                </div>
-                <span id="qwenTestState" class="field-state"></span>
-              </label>
-              <label>Qwen TTS 模型
-                <input id="qwenTtsModel" type="text" />
+              <label>BGM 音量
+                <input id="bgmVolume" type="number" min="0" max="1" step="0.05" />
               </label>
               <label>Qwen TTS Type
                 <input id="qwenTtsType" type="number" min="1" />
               </label>
-              <label>BGM 音量
-                <input id="bgmVolume" type="number" min="0" max="1" step="0.05" />
+              <label>计算设备（显卡加速）
+                <select id="computeDevice">
+                  <option value="auto">自动（有 NVIDIA 显卡则用 CUDA）</option>
+                  <option value="cpu">仅 CPU</option>
+                  <option value="cuda">强制 CUDA（需 Windows CUDA 版）</option>
+                </select>
               </label>
-              <label>YouTube cookies-from-browser
-                <input id="youtubeCookiesFromBrowser" type="text" placeholder="chrome:Default 或 edge:Default" />
-              </label>
-              <label>YouTube cookies.txt 路径
-                <input id="youtubeCookiesFile" type="text" placeholder="D:\cookies\youtube.txt" />
-              </label>
+            </div>
+          </div>
+
+          <div class="settings-card">
+            <h3>提示词</h3>
+            <label class="stacked">System Prompt
+              <textarea id="systemPrompt" rows="8"></textarea>
+            </label>
+            <label class="stacked">User Prompt Template
+              <textarea id="userPromptTemplate" rows="8"></textarea>
+            </label>
+          </div>
+
+          <div class="settings-card">
+            <h3>视频来源（YouTube / 本地）</h3>
+            <div class="form-grid">
               <label>YouTube player client
-                <input id="youtubePlayerClient" type="text" placeholder="mweb / web / ios，留空默认" />
-              </label>
-              <label>YouTube PO Token
-                <input id="youtubePoToken" type="password" autocomplete="off" placeholder="mweb.gvs+... 或 token 本体" />
+                <input id="youtubePlayerClient" type="text" placeholder="web_safari / mweb / web" />
               </label>
               <label>YouTube proxy
                 <input id="youtubeProxy" type="text" placeholder="http://127.0.0.1:7897" />
               </label>
+              <label>cookies-from-browser
+                <input id="youtubeCookiesFromBrowser" type="text" placeholder="chrome:Default" />
+              </label>
+              <label>cookies.txt 路径
+                <input id="youtubeCookiesFile" type="text" />
+              </label>
+              <label>PO Token
+                <input id="youtubePoToken" type="password" autocomplete="off" />
+              </label>
               <label>本地高清视频路径
-                <input id="localVideoPath" type="text" placeholder="D:\Videos\story.mp4" />
+                <input id="localVideoPath" type="text" placeholder="留空则从 YouTube 下载" />
               </label>
               <label>本地英文字幕路径
-                <input id="localSubtitlePath" type="text" placeholder="D:\Videos\story.en.srt" />
+                <input id="localSubtitlePath" type="text" />
               </label>
             </div>
-          </section>
+          </div>
         </section>
       </main>
     </div>

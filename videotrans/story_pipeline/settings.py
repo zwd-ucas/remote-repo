@@ -147,6 +147,10 @@ class StoryPipelineSettings:
     # CPU; drop to "medium"/"small" only when speed matters more than catching every line.
     asr_model: str = "large-v3"
     asr_fallback: str = "auto"
+    # Compute device for ASR (and vocal separation): "auto" uses CUDA when a GPU + CUDA
+    # build is present, else CPU; "cpu" forces CPU; "cuda" forces GPU. The Windows CUDA
+    # installer ships GPU wheels so this actually offloads to the graphics card.
+    compute_device: str = "auto"
     youtube_cookies_from_browser: str = ""
     youtube_cookies_file: str = ""
     youtube_player_client: str = "web_safari"
@@ -154,6 +158,9 @@ class StoryPipelineSettings:
     youtube_proxy: str = ""
     local_video_path: str = ""
     local_subtitle_path: str = ""
+    # Where finished videos are saved. Empty = keep only the per-task work dir; otherwise
+    # the final mp4 is copied here named after the video title.
+    output_dir: str = ""
 
     def to_dict(self, *, mask_secrets: bool = False) -> dict[str, Any]:
         data = asdict(self)

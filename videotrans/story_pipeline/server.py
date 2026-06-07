@@ -1,7 +1,9 @@
+import json
+import os
+import queue as queuelib
 import threading
 import time
 import uuid
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -19,13 +21,27 @@ from .story_segments import StoryCue
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = PACKAGE_DIR / "static"
-ROOT_DIR = Path.cwd()
+# Settings (with API keys), per-task work dirs, and downloaded models must live somewhere
+# writable. In a dev checkout that's the cwd; the packaged desktop app sets
+# STORY_DUBBING_HOME to a per-user folder (the program dir itself is read-only).
+ROOT_DIR = Path(os.environ["STORY_DUBBING_HOME"]).expanduser() if os.environ.get("STORY_DUBBING_HOME") else Path.cwd()
 OUTPUT_ROOT = ROOT_DIR / "output" / "story"
+OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 SETTINGS_PATH = default_settings_path(OUTPUT_ROOT)
 
 
+class _Cancelled(BaseException):
+    """Raised from a task's progress callback to abort the pipeline when cancelled.
+
+    A BaseException (not Exception) so the pipeline's internal `except Exception` blocks
+    don't swallow it — it propagates up to _run_task which returns cleanly.
+    """
+
+
 class RunRequest(BaseModel):
-    youtube_url: str
+    youtube_url: str | None = None
+    urls: list[str] | None = None
+    mode: str | None = "auto"
     settings: dict[str, Any] | None = None
 
 
@@ -33,18 +49,66 @@ class SettingsRequest(BaseModel):
     settings: dict[str, Any]
 
 
+# Map a pipeline step to an overall 0-100% (TTS, the long stage, has per-cue sub-progress).
+# Keys are matched as substrings of the step text, in order, so it stays monotonic.
+_PROGRESS_TABLE = [
+    ("saved", 98),
+    ("mux", 95),
+    ("separate", 91),
+    ("remove original", 91),
+    ("compress", 89),
+    ("assemble", 88),
+    ("prepare video", 86),
+    ("compose", 86),
+    ("tts", 55),
+    ("review", 52),
+    ("segment", 46),
+    ("translate", 38),
+    ("transcribe", 22),
+    ("importing", 8),
+    ("import", 8),
+    ("download", 6),
+]
+
+
+def _progress_pct(step: str, status: str) -> int:
+    if status == "ready":
+        return 100
+    if status == "queued":
+        return 0
+    s = (step or "").strip().lower()
+    if s.startswith("tts:") and "/" in s:
+        try:
+            done_str, rest = s[4:].split("/", 1)
+            done, total = int(done_str), int(rest.split()[0])
+            if total > 0:
+                return max(55, min(85, 55 + round(30 * done / total)))
+        except ValueError:
+            pass
+    for key, pct in _PROGRESS_TABLE:
+        if key in s:
+            return pct
+    return 4
+
+
 class TaskState:
-    def __init__(self, task_id: str, work_dir: Path):
+    def __init__(self, task_id: str, work_dir: Path, *, mode: str = "auto", url: str = ""):
         self.task_id = task_id
         self.work_dir = work_dir
+        self.mode = mode if mode in {"auto", "manual"} else "auto"
+        self.url = url
+        self.settings: StoryPipelineSettings | None = None
         self.status = "queued"
         self.step = "queued"
+        self.awaiting = ""  # the checkpoint stage name while status == "awaiting_review"
         self.logs: list[str] = []
         self.manifest: dict[str, Any] | None = None
         self.error: str | None = None
         self.pause_requested = False
+        self.cancelled = False
         self._resume_event = threading.Event()
         self._resume_event.set()
+        self._confirm_event = threading.Event()
         self.created_at = time.time()
         self.updated_at = self.created_at
 
@@ -53,6 +117,40 @@ class TaskState:
         self.logs.append(text)
         self.updated_at = time.time()
         self.wait_if_paused()
+        if self.cancelled:
+            # Abort the pipeline at the next progress checkpoint instead of running the
+            # whole job to completion after the user already cancelled.
+            raise _Cancelled()
+
+    def wait_for_confirm(self, stage: str) -> None:
+        """Manual-mode pause: hold here until the user confirms (or cancels)."""
+        self.awaiting = stage
+        self.status = "awaiting_review"
+        self.logs.append(f"awaiting:{stage}")
+        self.updated_at = time.time()
+        self._confirm_event.clear()
+        while not self._confirm_event.is_set() and not self.cancelled:
+            self._confirm_event.wait(timeout=0.2)
+        self.awaiting = ""
+        if not self.cancelled:
+            self.status = "running"
+            self.updated_at = time.time()
+
+    def confirm(self) -> None:
+        self._confirm_event.set()
+        if self.status == "awaiting_review":
+            self.status = "running"
+        self.logs.append("confirmed")
+        self.updated_at = time.time()
+
+    def cancel(self) -> None:
+        self.cancelled = True
+        self.pause_requested = False
+        self._resume_event.set()
+        self._confirm_event.set()
+        self.status = "cancelled"
+        self.logs.append("cancelled")
+        self.updated_at = time.time()
 
     def request_pause(self) -> None:
         if self.status not in {"running", "queued"}:
@@ -85,11 +183,38 @@ class TaskState:
         if self.status not in {"ready", "error"}:
             self.status = "running"
 
-    def to_dict(self) -> dict[str, Any]:
+    def summary(self) -> dict[str, Any]:
+        """Lightweight task info for the queue list (no heavy manifest payload)."""
+        manifest = self.manifest or {}
+        title = (manifest.get("title") or "").strip()
         return {
             "task_id": self.task_id,
+            "mode": self.mode,
+            "url": self.url,
+            "title": title or self.url,
             "status": self.status,
             "step": self.step,
+            "progress": _progress_pct(self.step, self.status),
+            "awaiting": self.awaiting,
+            "cancelled": self.cancelled,
+            "pause_requested": self.pause_requested,
+            "has_video": bool(manifest.get("final_video")),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        title = ((self.manifest or {}).get("title") or "").strip()
+        return {
+            "task_id": self.task_id,
+            "mode": self.mode,
+            "url": self.url,
+            "title": title or self.url,
+            "status": self.status,
+            "step": self.step,
+            "progress": _progress_pct(self.step, self.status),
+            "awaiting": self.awaiting,
+            "cancelled": self.cancelled,
             "logs": self.logs[-200:],
             "manifest": self.manifest,
             "error": self.error,
@@ -102,6 +227,51 @@ class TaskState:
 
 app = FastAPI(title="Story Pipeline Workbench")
 tasks: dict[str, TaskState] = {}
+
+# Tasks are processed one at a time (serial queue). A manual-mode task blocks the worker
+# at its review checkpoint until the user confirms, which is the intended serial behaviour.
+_task_queue: "queuelib.Queue[str]" = queuelib.Queue()
+
+
+def _worker_loop() -> None:
+    while True:
+        task_id = _task_queue.get()
+        state = tasks.get(task_id)
+        if state is None or state.cancelled:
+            continue
+        _run_task(state)
+
+
+_worker_thread = threading.Thread(target=_worker_loop, daemon=True)
+_worker_thread.start()
+
+
+def _recover_tasks() -> None:
+    """Re-populate finished tasks from disk so a server restart doesn't orphan past videos."""
+    if not OUTPUT_ROOT.exists():
+        return
+    for work_dir in sorted(OUTPUT_ROOT.iterdir(), key=lambda p: p.name):
+        manifest_path = work_dir / "manifest.json"
+        if not work_dir.is_dir() or not manifest_path.exists() or work_dir.name in tasks:
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not manifest.get("final_video"):
+            continue
+        state = TaskState(work_dir.name, work_dir, mode="auto", url=manifest.get("title") or work_dir.name)
+        state.manifest = manifest
+        state.status = "ready"
+        state.step = "ready"
+        try:
+            state.created_at = state.updated_at = manifest_path.stat().st_mtime
+        except OSError:
+            pass
+        tasks[work_dir.name] = state
+
+
+_recover_tasks()
 
 
 @app.get("/")
@@ -162,16 +332,41 @@ def test_qwen_settings(req: SettingsRequest):
 
 @app.post("/api/run")
 def run_pipeline(req: RunRequest):
-    if not req.youtube_url.strip():
-        raise HTTPException(status_code=400, detail="youtube_url is required")
+    raw = list(req.urls or [])
+    if req.youtube_url:
+        raw.append(req.youtube_url)
+    urls = [u.strip() for u in raw if u and u.strip()]
+    if not urls:
+        raise HTTPException(status_code=400, detail="at least one youtube_url is required")
+    mode = (req.mode or "auto").strip().lower()
     settings = _settings_from_dict(req.settings or load_settings(SETTINGS_PATH).to_dict())
     save_settings(settings, SETTINGS_PATH)
-    task_id = uuid.uuid4().hex[:12]
-    work_dir = OUTPUT_ROOT / task_id
-    state = TaskState(task_id, work_dir)
-    tasks[task_id] = state
-    thread = threading.Thread(target=_run_task, args=(state, req.youtube_url, settings), daemon=True)
-    thread.start()
+    created: list[dict[str, Any]] = []
+    for url in urls:
+        task_id = uuid.uuid4().hex[:12]
+        state = TaskState(task_id, OUTPUT_ROOT / task_id, mode=mode, url=url)
+        state.settings = settings
+        tasks[task_id] = state
+        _task_queue.put(task_id)
+        created.append(state.to_dict())
+    return {"tasks": created, "mode": mode}
+
+
+@app.post("/api/tasks/{task_id}/confirm")
+def confirm_task(task_id: str):
+    state = tasks.get(task_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Task not found")
+    state.confirm()
+    return state.to_dict()
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+def cancel_task(task_id: str):
+    state = tasks.get(task_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Task not found")
+    state.cancel()
     return state.to_dict()
 
 
@@ -185,7 +380,7 @@ def get_task(task_id: str):
 
 @app.get("/api/tasks")
 def list_tasks():
-    return [state.to_dict() for state in sorted(tasks.values(), key=lambda item: item.created_at, reverse=True)]
+    return [state.summary() for state in sorted(tasks.values(), key=lambda item: item.created_at, reverse=True)]
 
 
 @app.post("/api/tasks/{task_id}/pause")
@@ -225,8 +420,9 @@ def update_cues(task_id: str, payload: dict[str, Any]):
     cues = payload.get("cues")
     if not isinstance(cues, list):
         raise HTTPException(status_code=400, detail="cues must be a list")
+    state.work_dir.mkdir(parents=True, exist_ok=True)
     path = state.work_dir / "story_cues.json"
-    path.write_text(__import__("json").dumps(cues, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(cues, ensure_ascii=False, indent=2), encoding="utf-8")
     if state.manifest:
         state.manifest["cues"] = cues
     return {"status": "saved", "cues": cues}
@@ -251,7 +447,7 @@ def regenerate_all_tts(task_id: str, payload: dict[str, Any] | None = None):
     if not state.manifest:
         raise HTTPException(status_code=400, detail="Task manifest is not ready")
     settings = _settings_from_payload(payload)
-    cues = [StoryCue(**cue) for cue in state.manifest.get("cues", [])]
+    cues = [_cue_from_dict(cue) for cue in state.manifest.get("cues", [])]
     audio_files = _synthesize_task_cues(state, cues, settings)
     return {"status": "ready", "audio_files": audio_files}
 
@@ -267,22 +463,58 @@ def regenerate_cue_tts(task_id: str, cue_id: str, payload: dict[str, Any] | None
     if not cue_data:
         raise HTTPException(status_code=404, detail="Cue not found")
     settings = _settings_from_payload(payload)
-    audio_files = _synthesize_task_cues(state, [StoryCue(**cue_data)], settings)
+    audio_files = _synthesize_task_cues(state, [_cue_from_dict(cue_data)], settings)
     return {"status": "ready", "audio_files": audio_files}
 
 
-def _run_task(state: TaskState, url: str, settings: StoryPipelineSettings) -> None:
+def _run_task(state: TaskState) -> None:
+    if state.cancelled:
+        return
     state.status = "running"
+    state.updated_at = time.time()
+    settings = state.settings or load_settings(SETTINGS_PATH)
+    deps = PipelineDependencies(checkpoint=_make_checkpoint(state)) if state.mode == "manual" else PipelineDependencies()
     try:
-        pipeline = StoryPipeline(state.work_dir, PipelineDependencies(), progress=state.progress)
-        manifest = pipeline.run(url, settings)
+        pipeline = StoryPipeline(state.work_dir, deps, progress=state.progress)
+        manifest = pipeline.run(state.url, settings)
+        if state.cancelled:
+            return
         state.manifest = manifest.to_dict()
         state.status = "ready"
         state.progress("ready")
+    except _Cancelled:
+        return  # cancelled mid-run; status already set to "cancelled"
     except Exception as exc:
+        if state.cancelled:
+            return
         state.status = "error"
         state.error = str(exc)
-        state.progress(f"error: {exc}")
+        state.logs.append(f"error: {exc}")
+
+
+def _make_checkpoint(state: TaskState):
+    def checkpoint(cues, review_manifest):
+        if state.cancelled:
+            return cues
+        state.manifest = review_manifest.to_dict()
+        state.wait_for_confirm("review")
+        if state.cancelled:
+            return cues
+        cue_path = state.work_dir / "story_cues.json"
+        if cue_path.exists():
+            try:
+                data = json.loads(cue_path.read_text(encoding="utf-8"))
+                return [_cue_from_dict(item) for item in data]
+            except Exception as exc:  # malformed / incomplete edits -> keep the safe originals
+                state.logs.append(f"reload edited cues failed ({exc}); using originals")
+        return cues
+
+    return checkpoint
+
+
+def _cue_from_dict(data: dict[str, Any]) -> StoryCue:
+    fields = StoryCue.__dataclass_fields__.keys()
+    return StoryCue(**{key: value for key, value in data.items() if key in fields})
 
 
 def _settings_from_dict(data: dict[str, Any]) -> StoryPipelineSettings:

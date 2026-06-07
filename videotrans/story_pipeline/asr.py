@@ -53,9 +53,10 @@ def transcribe_audio(
     _extract_audio(video_path, wav)
 
     model_name = (settings.asr_model or "small").strip()
+    device, compute_type = _resolve_device(settings, progress)
     if progress:
-        progress(f"transcribe: ASR ({model_name})")
-    segments = _refine_segments(_run_asr(wav, model_name))
+        progress(f"transcribe: ASR ({model_name}, {device})")
+    segments = _refine_segments(_run_asr(wav, model_name, device, compute_type))
 
     items: list[SrtItem] = []
     line = 1
@@ -87,17 +88,44 @@ def transcribe_audio(
 VAD_PARAMETERS = {"threshold": 0.35, "speech_pad_ms": 600}
 
 
-def _run_asr(wav: Path, model_name: str) -> list[dict]:
+def _cuda_available() -> bool:
     try:
-        return _run_whisperx(wav, model_name)
+        import ctranslate2
+
+        return ctranslate2.get_cuda_device_count() > 0
+    except Exception:
+        return False
+
+
+def _resolve_device(settings: StoryPipelineSettings, progress: ProgressFn | None = None) -> tuple[str, str]:
+    """Pick (device, compute_type) from settings.compute_device, falling back to CPU."""
+    pref = (getattr(settings, "compute_device", "auto") or "auto").strip().lower()
+    if pref == "cpu":
+        return "cpu", "int8"
+    if (pref in {"cuda", "auto"}) and _cuda_available():
+        return "cuda", "float16"
+    if pref == "cuda" and progress:
+        progress("CUDA requested but no GPU/CUDA build found; using CPU")
+    return "cpu", "int8"
+
+
+def _run_asr(wav: Path, model_name: str, device: str = "cpu", compute_type: str = "int8") -> list[dict]:
+    try:
+        return _run_whisperx(wav, model_name, device, compute_type)
     except ImportError:
-        return _run_faster_whisper(wav, model_name)
+        return _run_faster_whisper(wav, model_name, device, compute_type)
 
 
-def _run_faster_whisper(wav: Path, model_name: str) -> list[dict]:
+def _run_faster_whisper(wav: Path, model_name: str, device: str = "cpu", compute_type: str = "int8") -> list[dict]:
     from faster_whisper import WhisperModel
 
-    model = WhisperModel(model_name, device="cpu", compute_type="int8")
+    try:
+        model = WhisperModel(model_name, device=device, compute_type=compute_type)
+    except Exception:
+        if device == "cpu":
+            raise
+        # GPU/CUDA init failed (missing driver/cuDNN) — degrade gracefully to CPU.
+        model = WhisperModel(model_name, device="cpu", compute_type="int8")
     # Word timestamps let us split coarse segments into precisely-timed sub-units, so the
     # Chinese anchors to where each phrase is actually spoken (finer picture sync).
     seg_iter, _info = model.transcribe(
@@ -156,11 +184,10 @@ def _unit_from_words(words: list[dict]) -> dict:
     }
 
 
-def _run_whisperx(wav: Path, model_name: str) -> list[dict]:
+def _run_whisperx(wav: Path, model_name: str, device: str = "cpu", compute_type: str = "int8") -> list[dict]:
     import whisperx  # ImportError -> caller falls back to faster-whisper
 
-    device = "cpu"
-    model = whisperx.load_model(model_name, device, compute_type="int8")
+    model = whisperx.load_model(model_name, device, compute_type=compute_type)
     audio = whisperx.load_audio(wav.as_posix())
     result = model.transcribe(audio, language="en")
     align_model, meta = whisperx.load_align_model(language_code="en", device=device)

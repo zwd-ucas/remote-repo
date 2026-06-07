@@ -27,6 +27,7 @@ class StoryManifest:
     cues: list[dict]
     audio_files: dict[str, str] = field(default_factory=dict)
     issues: list[dict] = field(default_factory=list)
+    saved_video: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -41,6 +42,9 @@ class PipelineDependencies:
     review: Callable[[list[dict], StoryPipelineSettings, ProgressFn], list[dict]] | None = None
     synthesize: Callable[[Sequence[StoryCue], StoryPipelineSettings, Path, ProgressFn], dict[str, str]] | None = None
     compose: Callable[[dict, Sequence[StoryCue], dict[str, str], StoryPipelineSettings, Path, ProgressFn], str] | None = None
+    # Manual-mode hook: called with the ready cues + a review manifest, returns the cues
+    # to actually synthesize (the caller may block for human edits and return edited cues).
+    checkpoint: Callable[[list[StoryCue], "StoryManifest"], list[StoryCue]] | None = None
 
 
 class StoryPipeline:
@@ -100,29 +104,28 @@ class StoryPipeline:
             default_voice=settings.qwen_default_voice,
         )
         target_path = self.work_dir / "zh.srt"
-        target_path.write_text(cues_to_srt(cues), encoding="utf-8")
-        (self.work_dir / "story_cues.json").write_text(
-            json.dumps([cue.to_dict() for cue in cues], ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        self._write_cues(cues, target_path)
+
+        # Manual-mode checkpoint: hand the ready cues to the caller for human review/edits
+        # (timeline, voice, subtitle, speaker) before any audio is generated.
+        checkpoint = self.dependencies.checkpoint
+        if checkpoint is not None:
+            review_manifest = self._build_manifest(
+                "awaiting_review", downloaded, cues, {}, source_subtitles, source_path, target_path, issues, "", ""
+            )
+            reviewed = checkpoint(cues, review_manifest)
+            if reviewed:
+                cues = list(reviewed)
+                self._write_cues(cues, target_path)
 
         self.progress("tts")
         audio_files = synthesize(cues, settings, self.work_dir, self.progress)
 
         self.progress("compose")
         final_video = compose(downloaded, cues, audio_files, settings, self.work_dir, self.progress)
-        manifest = StoryManifest(
-            status="ready",
-            video_id=str(downloaded.get("video_id") or ""),
-            title=str(downloaded.get("title") or ""),
-            work_dir=self.work_dir.as_posix(),
-            final_video=final_video,
-            source_subtitle=source_path.as_posix(),
-            target_subtitle=target_path.as_posix(),
-            source_subtitles=self._source_subtitle_rows(source_subtitles),
-            cues=[cue.to_dict() for cue in cues],
-            audio_files=audio_files,
-            issues=[issue.to_dict() for issue in issues],
+        saved_video = self._save_output(final_video, downloaded, settings)
+        manifest = self._build_manifest(
+            "ready", downloaded, cues, audio_files, source_subtitles, source_path, target_path, issues, final_video, saved_video
         )
         (self.work_dir / "manifest.json").write_text(
             json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2),
@@ -130,6 +133,52 @@ class StoryPipeline:
         )
         self.progress("ready")
         return manifest
+
+    def _write_cues(self, cues: Sequence[StoryCue], target_path: Path) -> None:
+        target_path.write_text(cues_to_srt(cues), encoding="utf-8")
+        (self.work_dir / "story_cues.json").write_text(
+            json.dumps([cue.to_dict() for cue in cues], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _build_manifest(
+        self, status, downloaded, cues, audio_files, source_subtitles, source_path, target_path, issues, final_video, saved_video
+    ) -> "StoryManifest":
+        return StoryManifest(
+            status=status,
+            video_id=str(downloaded.get("video_id") or ""),
+            title=str(downloaded.get("title") or ""),
+            work_dir=self.work_dir.as_posix(),
+            final_video=final_video,
+            saved_video=saved_video,
+            source_subtitle=source_path.as_posix(),
+            target_subtitle=target_path.as_posix(),
+            source_subtitles=self._source_subtitle_rows(source_subtitles),
+            cues=[cue.to_dict() for cue in cues],
+            audio_files=audio_files,
+            issues=[issue.to_dict() for issue in issues],
+        )
+
+    def _save_output(self, final_video: str, downloaded: dict, settings: StoryPipelineSettings) -> str:
+        """Copy the finished video to the user's configured output_dir, named by title."""
+        out_dir = (getattr(settings, "output_dir", "") or "").strip()
+        if not out_dir or not final_video or not Path(final_video).exists():
+            return ""
+        try:
+            import re
+            import shutil
+
+            dest_dir = Path(out_dir).expanduser()
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            base = str(downloaded.get("title") or downloaded.get("video_id") or "story").strip() or "story"
+            safe = re.sub(r'[\\/:*?"<>|\n\r\t]+', "_", base)[:80].strip() or "story"
+            dest = dest_dir / f"{safe}.zh-dub.mp4"
+            shutil.copy2(final_video, dest)
+            self.progress(f"saved to {dest}")
+            return dest.as_posix()
+        except Exception as exc:  # pragma: no cover - filesystem/runtime
+            self.progress(f"save output failed: {exc}")
+            return ""
 
     def _write_source_srt(self, source_subtitles: Sequence[SrtItem], path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

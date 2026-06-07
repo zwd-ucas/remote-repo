@@ -16,6 +16,15 @@ def test_default_asr_model_is_robust_for_character_voices():
     assert StoryPipelineSettings().asr_model not in {"tiny", "base"}
 
 
+def test_resolve_device_respects_cpu_and_falls_back():
+    from videotrans.story_pipeline.settings import StoryPipelineSettings
+
+    assert asr._resolve_device(StoryPipelineSettings(compute_device="cpu")) == ("cpu", "int8")
+    # "auto" / "cuda" resolve to cuda only when a CUDA build + GPU is present, else cpu.
+    device, ctype = asr._resolve_device(StoryPipelineSettings(compute_device="auto"))
+    assert device in {"cpu", "cuda"} and ctype in {"int8", "float16"}
+
+
 def test_refine_segments_splits_coarse_segments_at_sentences_and_pauses():
     # A coarse multi-sentence segment must split into finer, word-accurately-timed units
     # so each Chinese line anchors to where its English is actually spoken.
@@ -35,7 +44,7 @@ def test_transcribe_audio_maps_segments_to_ms_srt_items(monkeypatch, tmp_path):
     monkeypatch.setattr(
         asr,
         "_run_asr",
-        lambda wav, model: [
+        lambda wav, model, *args: [
             {"start": 1.5, "end": 3.25, "text": " Who's that on my bridge? "},
             {"start": 3.25, "end": 4.0, "text": ""},  # empty -> dropped
             {"start": 4.0, "end": 5.5, "text": "You may cross."},

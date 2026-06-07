@@ -38,6 +38,10 @@ dependencies = [
 test = [
     "pytest>=8",
 ]
+# Native desktop window for the packaged app (uses the OS webview).
+desktop = [
+    "pywebview>=5.0",
+]
 
 # Declare packages explicitly. Flat-layout auto-discovery breaks once runtime
 # directories such as `output/` appear next to `videotrans/`, because setuptools

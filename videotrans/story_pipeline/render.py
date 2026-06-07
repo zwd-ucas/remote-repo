@@ -116,12 +116,18 @@ def _separate_instrument(source_audio: Path, work_dir: Path, progress: ProgressF
     """
     try:
         import logging
+        import os
 
         from audio_separator.separator import Separator
     except Exception:
         return None
     try:
-        separator = Separator(output_dir=work_dir.as_posix(), output_format="WAV", log_level=logging.WARNING)
+        sep_kwargs = dict(output_dir=work_dir.as_posix(), output_format="WAV", log_level=logging.WARNING)
+        home = os.environ.get("STORY_DUBBING_HOME")
+        if home:  # packaged app: keep the downloaded separation model in the writable data dir
+            sep_kwargs["model_file_dir"] = (Path(home).expanduser() / "models" / "audio-separator").as_posix()
+        # onnxruntime-gpu (the Windows CUDA build) makes audio-separator auto-offload to the GPU.
+        separator = Separator(**sep_kwargs)
         # Fast MDX-NET instrumental model (onnx) — the default bs_roformer is far too slow
         # on CPU (~20 min for a 6-min clip). MDX is ~2 min and gives a clean instrumental.
         separator.load_model(model_filename="UVR-MDX-NET-Inst_HQ_3.onnx")
