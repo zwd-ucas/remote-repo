@@ -18,6 +18,7 @@ test.py
 .idea
 .venv
 .pytest_cache
+*.egg-info/
 AGENTS.md
 err.txt
 nolang.txt

@@ -42,18 +42,22 @@ def download_youtube(
         video_id = str(info.get("id") or "video")
         title = str(info.get("title") or video_id)
         video_path = _find_downloaded_video(work, video_id)
-        subtitle_path = _download_best_english_subtitle(info, work, video_id, progress)
-        if not subtitle_path:
-            subtitle_path, source_subtitles = _asr_fallback(video_path, work, progress)
+        if settings and settings.asr_alignment:
+            # ASR transcribes the audio for timing — no captions / subs PO token needed.
+            subtitle_path, source_subtitles = None, []
         else:
-            if subtitle_path.suffix.lower() == ".vtt":
-                subtitle_path = _vtt_to_srt(subtitle_path)
-            source_subtitles = parse_srt_file(subtitle_path)
+            subtitle_path = _download_best_english_subtitle(info, work, video_id, progress)
+            if not subtitle_path:
+                subtitle_path, source_subtitles = _asr_fallback(video_path, work, progress)
+            else:
+                if subtitle_path.suffix.lower() == ".vtt":
+                    subtitle_path = _vtt_to_srt(subtitle_path)
+                source_subtitles = parse_srt_file(subtitle_path)
         return {
             "video_id": video_id,
             "title": title,
             "video_path": video_path.as_posix(),
-            "subtitle_path": subtitle_path.as_posix(),
+            "subtitle_path": subtitle_path.as_posix() if subtitle_path else "",
             "source_subtitles": source_subtitles,
         }
 
@@ -84,6 +88,8 @@ def _import_local_source(settings: StoryPipelineSettings, work: Path, progress: 
         if subtitle_path.suffix.lower() == ".vtt":
             subtitle_path = _vtt_to_srt(subtitle_path)
         source_subtitles = parse_srt_file(subtitle_path)
+    elif settings.asr_alignment:
+        source_subtitles = []  # ASR will transcribe the audio for timing
     else:
         subtitle_path, source_subtitles = _asr_fallback(target_video, work, progress)
 
@@ -91,7 +97,7 @@ def _import_local_source(settings: StoryPipelineSettings, work: Path, progress: 
         "video_id": "local-" + _safe_stem(video_path.stem),
         "title": video_path.stem,
         "video_path": target_video.as_posix(),
-        "subtitle_path": subtitle_path.as_posix(),
+        "subtitle_path": subtitle_path.as_posix() if subtitle_path else "",
         "source_subtitles": source_subtitles,
     }
 
@@ -101,11 +107,37 @@ def _safe_stem(value: str) -> str:
     return safe or "video"
 
 
+def _js_runtime_options() -> dict:
+    """Enable a JS runtime so yt-dlp can solve YouTube's n-sig challenge.
+
+    Modern YouTube web clients scramble their stream URLs with an `n` parameter
+    that must be transformed by running the player JavaScript. yt-dlp only
+    enables `deno` by default, so without this the web/web_safari clients fail
+    with "n challenge solving failed" and fall back to images-only. Enable the
+    locally available runtime (preferring node) instead.
+    """
+    node = shutil.which("node")
+    if node:
+        return {"node": {"path": node}}
+    deno = shutil.which("deno")
+    if deno:
+        return {"deno": {"path": deno}}
+    return {}
+
+
 def _yt_dlp_options(work: Path, settings: StoryPipelineSettings | None = None) -> dict:
     settings = settings or StoryPipelineSettings()
     opts = {
         "outtmpl": str(work / "%(id)s.%(ext)s"),
-        "format": "bv*[ext=mp4][vcodec!=none]+ba[ext=m4a]/bv*[vcodec!=none]+ba[acodec!=none]/best[ext=mp4][vcodec!=none][acodec!=none]/best",
+        # Cap quality at 1080p. The selectors cover both DASH delivery (separate
+        # video+audio that yt-dlp merges) and muxed HLS streams such as those the
+        # web_safari client exposes up to 1080p.
+        "format": (
+            "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/"
+            "bv*[height<=1080]+ba/"
+            "b[height<=1080][ext=mp4]/"
+            "b[height<=1080]/b"
+        ),
         "merge_output_format": "mp4",
         "ffmpeg_location": _ffmpeg_location(),
         "writesubtitles": False,
@@ -113,6 +145,9 @@ def _yt_dlp_options(work: Path, settings: StoryPipelineSettings | None = None) -
         "quiet": True,
         "no_warnings": True,
     }
+    js_runtimes = _js_runtime_options()
+    if js_runtimes:
+        opts["js_runtimes"] = js_runtimes
     if settings.youtube_proxy.strip():
         opts["proxy"] = settings.youtube_proxy.strip()
     if settings.youtube_cookies_file.strip():

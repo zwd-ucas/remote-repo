@@ -7,8 +7,12 @@ def test_youtube_download_prefers_high_quality_without_android_client(tmp_path):
 
     assert _download_strategies() == ["default"]
     assert opts["format"].startswith("bv*")
+    assert "height<=1080" in opts["format"]  # capped at 1080p
     assert opts["merge_output_format"] == "mp4"
-    assert "extractor_args" not in opts
+    # Default to the web_safari client (web-family, exposes 1080p HLS), never android.
+    client = opts["extractor_args"]["youtube"]["player_client"]
+    assert client == ["web_safari"]
+    assert "android" not in client
 
 
 def test_youtube_download_can_use_cookies_and_po_token_without_android(tmp_path):

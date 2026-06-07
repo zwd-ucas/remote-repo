@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "story-dubbing-workbench"
 version = "1.0.0"
@@ -11,12 +15,39 @@ dependencies = [
     "requests>=2.32",
     "uvicorn>=0.30",
     "yt-dlp>=2026.03.17",
+    # pydub imports the stdlib `audioop` module, which was removed in Python 3.13
+    # (PEP 594). Pull in the backport when running on 3.13+ so the project keeps
+    # working across the supported `requires-python` range.
+    "audioop-lts>=0.2; python_version >= '3.13'",
+    # YouTube now scrambles stream URLs (n-sig challenge) and gates 1080p web
+    # formats behind a Proof-of-Origin (PO) token. yt-dlp-ejs ships the JS
+    # challenge-solver scripts (run via a node/deno runtime) and the bgutil
+    # plugin generates PO tokens. See README "YouTube 1080p downloads".
+    "yt-dlp-ejs>=0.8",
+    "bgutil-ytdlp-pot-provider>=1.3",
+    # ASR forced-alignment on the original audio for precise, picture-synced anchors.
+    # faster-whisper is WhisperX's transcription backend (no torch). For extra
+    # word-level wav2vec2 precision, also `pip install whisperx` — asr.py auto-detects it.
+    "faster-whisper>=1.0",
+    # AI vocal separation to extract a clean BGM (instrumental) track — the center-cut
+    # cancels centered music along with the narration, so the music drops out.
+    "audio-separator[cpu]>=0.18",
 ]
 
 [project.optional-dependencies]
 test = [
     "pytest>=8",
 ]
+
+# Declare packages explicitly. Flat-layout auto-discovery breaks once runtime
+# directories such as `output/` appear next to `videotrans/`, because setuptools
+# then sees multiple top-level packages and refuses to build.
+[tool.setuptools.packages.find]
+include = ["videotrans*"]
+
+[tool.setuptools.package-data]
+videotrans = ["voicejson/*.json"]
+"videotrans.story_pipeline" = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
