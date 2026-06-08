@@ -8,7 +8,9 @@ DEFAULT_SYSTEM_PROMPT = """你是儿童童话 story 视频的中文翻译、字�
 
 时间轴规则：
 - 以原英文 SRT 的 cue 时间为基准，不要随意大幅挪动句子的位置。
-- 【重要·合并过碎的句子】英文 SRT 经常被切得很碎（单独的拟声词如“trip trap”、半句、很短的引导语）。把相邻的、同一个人说的过短片段【合并成一个完整自然的中文 cue】：source_lines 写成被合并的多个行号（如 [5,6,7]），时间取这些行的整体范围。宁可合并、少切几条，也绝不要让单条 cue 时间过短、语速被迫加快。目标是每条 cue 都是一句完整、能从容说完的话。
+- 【合并过碎的句子】英文 SRT 经常被切得很碎（单独的拟声词、半句、很短的引导语）。把相邻的、同一个人说的过短片段合并成一个完整自然的中文 cue：source_lines 写成被合并的多个行号（如 [5,6,7]），时间取这些行的整体范围。目标是每条 cue 都是一句完整、能从容说完的话。
+- 【合并要有上限】每条 cue 最多合并约 2–3 个原始行、覆盖画面时长不超过约 8 秒。一长段叙述（比如连续好几行）要切成多条 cue，【绝对不要把很多行（如 5 行及以上）并成一条】，否则一条字幕会卡住很久、画面对不上。
+- 【source_lines 不能重叠/重复】每个英文 source line 只能归属一条 cue（同一拆分组除外）。不同 cue 的 source_lines 绝不能重叠或重复——例如不能既输出 [61,62,63] 又输出 [63,64,65]（第 63 行重复了）。相邻 cue 的行号要首尾相接、不交叉。
 - 只有在【一个时间段里确实有多人说话，或旁白与角色对白混在一起】时才拆分；拆分时重复使用同一 source_lines 并给出不重叠的 start_ms/end_ms。
 - 拆分/分配时间要根据中文句子长度、口播量和自然停顿，不要简单平均。
 - 尽量让语速接近自然中文配音，优先控制在约 0.18–0.35 秒/字；受原时间轴限制时可适当放宽。
@@ -50,6 +52,7 @@ Qwen 配音音色规则：
 - Available Qwen TTS voices 中每个元素包含 label、voice_param、zh_name、gender、feature、recommended_roles。voice 字段可以返回 label、voice_param 或中文音色名，系统会统一解析。
 - 同一个角色全文使用同一个“角色-配音音色”组合。
 - 【音色性别必须匹配角色性别】：每个 voice 都带 gender 字段。男性角色（国王、王子、父亲、男性怪物/巨魔/男性反派）必须选男声；女性角色必须选女声。绝不能给男性角色配女声——例如给男性巨魔配“诡婆婆”这种女性老巫婆音色是错误的，反之亦然。
+- 【输出 gender 字段】为每条 cue 输出角色性别 gender：男性角色填“男”，女性角色填“女”，旁白或中性角色填“中性”。系统会用它强制把性别不符的音色换成同性别音色。
 - 【各角色之间、以及与旁白之间音色要明显区分】：性别、年龄、音高、音质尽量拉开。尤其反派/怪物要让人一听就明显不同于旁白，绝不能被误当成旁白的声音。
 - 如果同一 speaker 在前文已经确定 voice，后文必须继续使用同一个 voice，除非用户在界面中特别修改。
 - 女巫、老巫婆、邪恶老婆婆、恶毒后妈、恶毒王后、黑魔法角色、阴森女性长辈等，必须使用“诡婆婆”。
@@ -81,7 +84,7 @@ Qwen 配音音色规则：
 
 输出规则：
 - 只返回 JSON，不要 Markdown。
-- 每个元素必须包含 source_lines、speaker、speaker_type、voice、zh_text、confidence、instruction。
+- 每个元素必须包含 source_lines、speaker、speaker_type、voice、gender、zh_text、confidence、instruction。
 - 如果输出文本使用配音标记格式 [角色-配音音色] 中文正文，系统会自动拆出 speaker/voice 并去掉标记；但仍建议同时正确填写 speaker 和 voice 字段。
 - zh_text 字段必须是干净中文字幕正文，不要保留 [角色-音色] 标记。"""
 
@@ -91,12 +94,12 @@ Source subtitles JSON:
 {subtitles_json}
 
 Return a compact JSON array. Each item must include:
-source_lines, speaker, speaker_type, voice, zh_text, confidence, instruction.
+source_lines, speaker, speaker_type, voice, gender, zh_text, confidence, instruction.
 - instruction: 一句中文配音导演提示，描述这句话的情绪、语气、语速，像给专业配音演员的指导。
   例如旁白用“温暖沉稳、娓娓道来、中速”，害怕的角色用“害怕颤抖、语速偏快”，
   凶狠反派用“凶狠低沉、充满威胁、气势汹汹、语速偏慢”。要贴合剧情和上下文，富有感情。
-- zh_text 要简洁，尽量贴合该 cue 的 start_ms/end_ms 在画面上的时长，不要过长导致配音和画面对不上；
-  紧张/动作场景语速偏快，舒缓/抒情场景语速偏慢，并在 instruction 里写明。
+- gender: 该 cue 说话人的性别，“男”/“女”/“中性”（旁白用“中性”）。
+- 【时间预算·关键同步规则】每条 cue 的中文必须能在它的画面时间内用自然语速从容说完：把中文字数控制在约「(该 cue 的 end_ms − start_ms) ÷ 240」字以内（约 0.24 秒/字）。例如该 cue 跨度约 2400ms → 中文不超过约 10 个字。宁可把句子翻得更精炼（保持原意不变、口语自然），也绝不要让中文太长，否则配音会被迫加速、和画面对不上。紧张/动作场景语速可偏快，舒缓/抒情可偏慢，并在 instruction 里写明。
 Use one stable voice for each speaker across this batch and reuse prior speaker names consistently.
 Optional when splitting one English cue internally: start_ms, end_ms.
 Do not move text across source subtitle cues."""
@@ -136,9 +139,10 @@ class StoryPipelineSettings:
     # that overrun their on-screen window (pitch-preserved, capped by dub_max_speed).
     # "extend": never compress; keep natural speed and hold the last frame for any tail.
     dub_fit_mode: str = "fit"
-    # Per-cue pitch-preserving compression cap. Only over-long lines are sped up, up to
-    # this factor, so picture sync holds without a global uniform speed-up.
-    dub_max_speed: float = 1.5
+    # Per-cue pitch-preserving compression cap. Time-budgeted translation keeps most lines
+    # within their window, so only a few need a gentle speed-up — keep the cap low (1.2) to
+    # protect voice naturalness; the rare overflow recovers at the next slack.
+    dub_max_speed: float = 1.2
     # Use WhisperX ASR forced-alignment on the original audio for precise, picture-synced
     # anchors (instead of the rolling YouTube auto-caption timings).
     asr_alignment: bool = True

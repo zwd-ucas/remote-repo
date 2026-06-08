@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .settings import StoryPipelineSettings
-from .story_segments import StoryCue, cues_to_srt, normalize_story_cues, source_to_srt
+from .story_segments import NATURAL_CHAR_MS, StoryCue, cues_to_srt, normalize_story_cues, source_to_srt
 from .types import SrtItem
 from .voices import qwen_voice_catalog
 
@@ -103,6 +103,9 @@ class StoryPipeline:
             valid_voices=valid_voices,
             default_voice=settings.qwen_default_voice,
         )
+        # Deterministic time-budget pass: trim the few cues whose Chinese is too long for their
+        # window so they play at natural speed (the prompt rule alone misses the tail).
+        cues = fit_translations_to_budget(cues, settings, self.progress)
         target_path = self.work_dir / "zh.srt"
         self._write_cues(cues, target_path)
 
@@ -420,12 +423,17 @@ def default_review(raw_cues: list[dict], settings: StoryPipelineSettings, progre
         return raw_cues
     progress("review speakers")
     votes: dict[str, Counter] = {}
+    gender_votes: dict[str, Counter] = {}
     for cue in raw_cues:
         speaker = str(cue.get("speaker") or "").strip()
         voice = str(cue.get("voice") or "").strip()
         if speaker and voice:
             votes.setdefault(speaker, Counter())[voice] += 1
+        gender = str(cue.get("gender") or "").strip()
+        if speaker and gender in ("男", "女", "中性"):
+            gender_votes.setdefault(speaker, Counter())[gender] += 1
     cast = {speaker: counter.most_common(1)[0][0] for speaker, counter in votes.items() if counter}
+    genders = {speaker: counter.most_common(1)[0][0] for speaker, counter in gender_votes.items() if counter}
 
     compact = [
         {
@@ -461,11 +469,61 @@ def default_review(raw_cues: list[dict], settings: StoryPipelineSettings, progre
                 "speaker": speaker,
                 "speaker_type": "narrator" if speaker == "旁白" else "character",
                 "voice": cast.get(speaker) or settings.qwen_default_voice,
+                "gender": genders.get(speaker, ""),
                 "zh_text": cue.get("zh_text"),
                 "instruction": cue.get("instruction", ""),
             }
         )
     return corrected
+
+
+def _visible_chars(text: str) -> int:
+    import re as _re
+
+    return len(_re.sub(r"\s", "", text or ""))
+
+
+def fit_translations_to_budget(cues, settings: StoryPipelineSettings, progress: ProgressFn):
+    """Shorten ONLY the cues whose Chinese is too long for their on-screen window, so they
+    can be spoken at natural speed instead of being compressed. The single-shot prompt rule
+    doesn't reliably trim the tail, so do a deterministic targeted rewrite of the overflowing
+    cues — the core of the time-budget sync lever.
+    """
+    from .story_segments import parse_llm_json
+
+    over = []
+    for cue in cues:
+        budget = max(4, int(max(1, cue.end_ms - cue.start_ms) / NATURAL_CHAR_MS))
+        original = _visible_chars(cue.zh_text)
+        if original > budget * 1.08:  # 8% tolerance before we bother
+            over.append((cue, budget, original))
+    if not over:
+        return cues
+    progress(f"fit:{len(over)}")
+    items = [{"id": i, "max_chars": budget, "zh": cue.zh_text} for i, (cue, budget, _original) in enumerate(over)]
+    system = (
+        "你是中文配音台词精炼师。把每条中文改写得更短，必须不超过 max_chars 个汉字；"
+        "但要保持原意、口语自然、有童话感、保留语气，不改变剧情，不丢关键信息。"
+    )
+    user = "只返回 JSON 数组，每个元素 {id, zh}：\n" + json.dumps(items, ensure_ascii=False)
+    try:
+        parsed = parse_llm_json(
+            call_llm_chat(settings, system, user, max_tokens=SEGMENT_MAX_TOKENS, reasoning_effort="", model=settings.llm_segment_model)
+        )
+    except Exception as exc:  # noqa: BLE001 — fitting is best-effort; keep originals on failure
+        progress(f"fit failed ({exc}); keeping originals")
+        return cues
+    shortened = {}
+    for item in parsed if isinstance(parsed, list) else []:
+        try:
+            shortened[int(item.get("id"))] = str(item.get("zh") or "").strip()
+        except (TypeError, ValueError):
+            continue
+    for i, (cue, _budget, original) in enumerate(over):
+        new = shortened.get(i, "")
+        if new and _visible_chars(new) < original:
+            cue.zh_text = new
+    return cues
 
 
 def llm_translate(source_subtitles: Sequence[SrtItem], settings: StoryPipelineSettings, progress: ProgressFn) -> list[str]:

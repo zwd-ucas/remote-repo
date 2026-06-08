@@ -355,3 +355,28 @@ def _voice_sort_key(param: str) -> tuple[int, str]:
 def _label_zh_name(label: str) -> str:
     match = re.match(r"^(.*?)\(", label)
     return match.group(1) if match else label
+
+
+def _voice_param(voice: str) -> str:
+    """Get the Qwen voice_param from a label ('苏瑶(Serena)'), a param ('Serena'), or a zh_name."""
+    match = re.search(r"\(([^)]+)\)\s*$", voice or "")
+    if match:
+        return match.group(1).strip()
+    if voice in QWEN_VOICE_DETAILS:
+        return voice
+    for param, details in QWEN_VOICE_DETAILS.items():
+        if details.get("zh_name") == voice:
+            return param
+    return voice or ""
+
+
+def voice_gender(voice: str) -> str:
+    """Return '男' / '女' / '' for a voice given by label, param, or zh_name."""
+    return str(QWEN_VOICE_DETAILS.get(_voice_param(voice), {}).get("gender", ""))
+
+
+def same_gender_voices(gender: str, valid_voices) -> list[str]:
+    """Voices from valid_voices whose gender matches, in catalog order."""
+    gender = (gender or "").strip()
+    matches = [v for v in valid_voices if voice_gender(v) == gender]
+    return sorted(matches, key=lambda v: _voice_sort_key(_voice_param(v)))

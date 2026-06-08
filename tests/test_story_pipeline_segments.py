@@ -4,6 +4,61 @@ from videotrans.story_pipeline.story_segments import normalize_story_cues
 from videotrans.story_pipeline.types import SrtItem
 
 
+def test_normalize_de_overlaps_and_splits_overlong_cues():
+    # Two real bugs from the LLM output: (a) overlapping source_lines — line 3 in both
+    # [1,2,3] and [3,4,5] -> duplicated English + overlapping windows; (b) a cue that
+    # swallowed 6 lines into one ~12s paragraph. normalize must partition the lines and
+    # break up the over-merged cue.
+    subs = [_srt(i, (i - 1) * 2000, i * 2000, f"line{i} word word") for i in range(1, 12)]
+    raw = [
+        {"source_lines": [1, 2, 3], "speaker": "旁白", "voice": "苏瑶(Serena)", "zh_text": "叙述一。"},
+        {"source_lines": [3, 4, 5], "speaker": "旁白", "voice": "苏瑶(Serena)", "zh_text": "叙述二。"},
+        {"source_lines": [6, 7, 8, 9, 10, 11], "speaker": "旁白", "voice": "苏瑶(Serena)", "zh_text": "句一。句二。句三。句四。"},
+    ]
+    cues, _ = normalize_story_cues(raw, subs, valid_voices={"苏瑶(Serena)"}, default_voice="苏瑶(Serena)")
+
+    seen: set[int] = set()
+    for cue in cues:
+        for line in cue.source_lines:
+            assert line not in seen, f"line {line} appears in two cues"
+            seen.add(line)
+    assert all(len(cue.source_lines) <= 4 for cue in cues), "an over-merged cue survived"
+    for a, b in zip(cues, cues[1:]):
+        assert a.end_ms <= b.start_ms, f"cue windows overlap: {a.end_ms} > {b.start_ms}"
+    assert len(cues) >= 4  # the 6-line cue was split into multiple
+
+
+def test_normalize_enforces_voice_gender():
+    # A male character (gender=男) the LLM mistakenly gave a female voice must be swapped to
+    # a male voice — the deterministic backstop for the troll-with-a-witch-voice bug.
+    from videotrans.story_pipeline.voices import voice_gender
+
+    subs = [_srt(i, (i - 1) * 1000, i * 1000, f"w{i}") for i in range(1, 3)]
+    raw = [
+        {"source_lines": [1], "speaker": "巨魔", "voice": "诡婆婆(Ebona)", "gender": "男", "zh_text": "我要吃了你！"},
+        {"source_lines": [2], "speaker": "巨魔", "voice": "诡婆婆(Ebona)", "gender": "男", "zh_text": "谁在桥上？"},
+    ]
+    cues, _ = normalize_story_cues(raw, subs, valid_voices={"诡婆婆(Ebona)", "田叔(Vincent)", "苏瑶(Serena)"}, default_voice="苏瑶(Serena)")
+    assert voice_gender(cues[0].voice) == "男"
+
+
+def test_fit_translations_to_budget_shortens_only_overflowing_cues(monkeypatch):
+    # The deterministic time-budget pass shortens a cue whose Chinese is too long for its
+    # window (so it plays at natural speed) and leaves a comfortably-fitting cue untouched.
+    from videotrans.story_pipeline import pipeline
+    from videotrans.story_pipeline.settings import StoryPipelineSettings
+    from videotrans.story_pipeline.story_segments import StoryCue
+
+    over = StoryCue(id="a", source_lines=[1], start_ms=0, end_ms=1000, speaker="旁白", speaker_type="narrator",
+                    voice="x", zh_text="一二三四五六七八九十一二三四五六七八九十")  # 20 chars in 1000ms (~4 budget)
+    fits = StoryCue(id="b", source_lines=[2], start_ms=1000, end_ms=3000, speaker="旁白", speaker_type="narrator",
+                    voice="x", zh_text="很好。")
+    monkeypatch.setattr(pipeline, "call_llm_chat", lambda *a, **k: json.dumps([{"id": 0, "zh": "一二三四"}]))
+    out = pipeline.fit_translations_to_budget([over, fits], StoryPipelineSettings(), lambda *_: None)
+    assert out[0].zh_text == "一二三四"  # the overflowing cue was trimmed
+    assert out[1].zh_text == "很好。"  # the fitting cue was left alone
+
+
 def test_review_reattributes_speaker_and_inherits_cast_voice(monkeypatch):
     # The speaker-review pass must fix a mis-attributed line and give it the speaker's
     # established (cast-majority) voice — so a character's line never stays in the wrong

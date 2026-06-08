@@ -165,9 +165,15 @@ def _refine_segments(segments: list[dict], *, max_gap_s: float = 0.55, max_dur_s
             current.append(word)
             text = str(word.get("word") or "").strip()
             ends_sentence = text.endswith((".", "!", "?", "。", "！", "？", "…"))
+            # Also break at a clause boundary (comma/semicolon/dash), but only once the unit
+            # is already substantial — so run-on clauses split cleanly without chopping short
+            # phrases into fragments.
+            ends_clause = text.endswith((",", "，", ";", "；", ":", "：", "—"))
+            unit_dur = word["end"] - current[0]["start"]
+            unit_substantial = len(current) >= 6 or unit_dur >= 2.5
             gap_to_next = (words[i + 1]["start"] - word["end"]) if i + 1 < len(words) else 0.0
-            too_long = (word["end"] - current[0]["start"]) >= max_dur_s
-            if ends_sentence or gap_to_next >= max_gap_s or too_long:
+            too_long = unit_dur >= max_dur_s
+            if ends_sentence or (ends_clause and unit_substantial) or gap_to_next >= max_gap_s or too_long:
                 refined.append(_unit_from_words(current))
                 current = []
         if current:

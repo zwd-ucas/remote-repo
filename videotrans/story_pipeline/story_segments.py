@@ -1,9 +1,15 @@
 import json
+import math
 import re
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Sequence
 
 from .types import SrtItem
+
+# Natural Chinese narration pace (~4.2 chars/sec): how long it takes to speak one character.
+# Single source of truth for sizing a cue's text to its window — used by the budget-fit pass
+# (pipeline) and the echoed-cue fallback window in _dedupe_source_lines below.
+NATURAL_CHAR_MS = 240
 
 
 @dataclass
@@ -67,9 +73,20 @@ def normalize_story_cues(
     valid_voices: set[str],
     default_voice: str,
 ) -> tuple[list[StoryCue], list[StoryCueIssue]]:
+    from collections import Counter
+
     by_line = {int(_item_get(item, "line")): item for item in source_subtitles}
     cues: list[StoryCue] = []
     issues: list[StoryCueIssue] = []
+
+    # Per-speaker gender votes from the LLM (when it supplies a "gender" field), used to fix
+    # a character assigned an opposite-gender voice (e.g. a male troll given a female voice).
+    speaker_genders: dict[str, Counter] = {}
+    for raw in payload:
+        speaker_name = str(raw.get("speaker") or "").strip()
+        gender = str(raw.get("gender") or "").strip()
+        if speaker_name and gender in ("男", "女"):
+            speaker_genders.setdefault(speaker_name, Counter())[gender] += 1
 
     for idx, raw in enumerate(payload):
         lines = sorted(dict.fromkeys(_normal_lines(raw.get("source_lines"))))
@@ -139,8 +156,166 @@ def normalize_story_cues(
                 instruction=str(raw.get("instruction") or "").strip(),
             )
         )
+    cues = _dedupe_source_lines(cues, by_line)
+    cues = _split_overlong_cues(cues, by_line)
     cues = _enforce_speaker_voice_consistency(cues)
+    cues = _enforce_voice_gender(cues, speaker_genders, valid_voices)
     return _rebalance_internal_splits(cues, source_subtitles), issues
+
+
+def _enforce_voice_gender(cues: list[StoryCue], speaker_genders: dict, valid_voices: set[str]) -> list[StoryCue]:
+    """If a speaker's voice gender contradicts the character's gender (per the LLM), swap to a
+    same-gender voice — a deterministic backstop for the prompt's gender rule."""
+    from .voices import same_gender_voices, voice_gender
+
+    canonical = {speaker: counter.most_common(1)[0][0] for speaker, counter in speaker_genders.items() if counter}
+    used = {cue.voice for cue in cues}
+    remap: dict[str, str] = {}
+    for cue in cues:
+        want = canonical.get(cue.speaker)
+        if not want or cue.speaker in remap:
+            continue
+        have = voice_gender(cue.voice)
+        if have and have != want:
+            options = same_gender_voices(want, valid_voices)
+            if options:
+                pick = next((v for v in options if v not in used), options[0])
+                remap[cue.speaker] = pick
+                used.add(pick)
+    for cue in cues:
+        if cue.speaker in remap:
+            cue.voice = remap[cue.speaker]
+    return cues
+
+
+def _dedupe_source_lines(cues: list[StoryCue], by_line: dict[int, SrtItem]) -> list[StoryCue]:
+    """Make source_lines partition the subtitles: every English line belongs to at most one
+    cue group and windows run in sequence.
+
+    The LLM sometimes emits overlapping source_lines — e.g. one cue [61,62,63] and the next
+    [63,64,65] — which shows the same English line twice, duplicates translation, and makes
+    the cue windows overlap in time. Walk the cues in order with a monotonic line pointer:
+    a group only keeps lines no earlier group already claimed, and each window is clamped to
+    start at/after the previous cue's end. Consecutive cues that share identical source_lines
+    are one split group (a "xxx说道" + its quote) and keep their shared lines.
+    """
+    out: list[StoryCue] = []
+    max_claimed = 0
+    prev_end = 0
+    i = 0
+    while i < len(cues):
+        signature = tuple(cues[i].source_lines)
+        j = i
+        while j < len(cues) and tuple(cues[j].source_lines) == signature:
+            j += 1
+        group = cues[i:j]
+        claimed = list(signature)
+        owned = [line for line in claimed if line > max_claimed]
+        if claimed:
+            max_claimed = max(max_claimed, claimed[-1])
+        if owned:
+            first, last = by_line.get(owned[0]), by_line.get(owned[-1])
+            window_start = int(_item_get(first, "start_time", prev_end)) if first is not None else prev_end
+            window_end = int(_item_get(last, "end_time", window_start + 1)) if last is not None else window_start + 1
+            window_start = max(window_start, prev_end)
+            window_end = max(window_end, window_start + 1)
+        else:
+            # The whole group's lines were already claimed by an earlier cue (the LLM echoed
+            # them). Keep the text, but give it a fresh window after the previous cue with no
+            # duplicate line numbers — better than re-showing a line that belongs elsewhere.
+            text_len = sum(len(re.sub(r"\s+", "", cue.zh_text)) for cue in group) or 1
+            window_start = prev_end
+            window_end = prev_end + max(600, min(8000, text_len * NATURAL_CHAR_MS))
+        for cue in group:
+            cue.source_lines = list(owned)
+            cue.start_ms = window_start
+            cue.end_ms = window_end
+        prev_end = window_end
+        out.extend(group)
+        i = j
+    return out
+
+
+def _split_sentences(text: str) -> list[str]:
+    parts = re.split(r"(?<=[。！？；…!?;.])", text.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _even_chunks(items: list, n: int) -> list[list]:
+    """Split items into exactly n contiguous, roughly-equal chunks."""
+    n = max(1, min(n, len(items)))
+    base, extra = divmod(len(items), n)
+    chunks, start = [], 0
+    for index in range(n):
+        size = base + (1 if index < extra else 0)
+        chunks.append(items[start : start + size])
+        start += size
+    return chunks
+
+
+def _split_pieces(text: str, target: int) -> list[str]:
+    """Break Chinese text into at least ``target`` pieces — preferring sentence then comma
+    boundaries, falling back to even character chunks for unpunctuated prose."""
+    pieces = _split_sentences(text)
+    if len(pieces) >= target:
+        return pieces
+    expanded: list[str] = []
+    for piece in pieces or [text.strip()]:
+        for part in re.split(r"(?<=[，,、])", piece):
+            part = part.strip()
+            if part:
+                expanded.append(part)
+    if len(expanded) >= target:
+        return expanded
+    chars = list(text.strip())
+    if target >= 2 and len(chars) >= target:
+        return ["".join(chunk) for chunk in _even_chunks(chars, target)]
+    return expanded or pieces or [text.strip()]
+
+
+def _split_overlong_cues(cues: list[StoryCue], by_line: dict[int, SrtItem], max_lines: int = 4) -> list[StoryCue]:
+    """Break a cue that swallowed too many subtitle lines (the LLM over-merging a whole
+    paragraph into one ~30s cue) into smaller cues, distributing its text across proportional
+    sub-ranges of its lines. Deterministic backstop for the merge cap — always splits a
+    too-long cue, even if the text has no sentence punctuation."""
+    out: list[StoryCue] = []
+    for cue in cues:
+        lines = list(cue.source_lines)
+        if len(lines) <= max_lines or not cue.zh_text.strip():
+            out.append(cue)
+            continue
+        target = math.ceil(len(lines) / 3)
+        pieces = _split_pieces(cue.zh_text, target)
+        n = min(target, len(pieces), len(lines))
+        if n < 2:
+            out.append(cue)  # genuinely unsplittable (e.g. a single character)
+            continue
+        line_chunks = _even_chunks(lines, n)
+        text_chunks = _even_chunks(pieces, n)
+        for k in range(n):
+            sub_lines = line_chunks[k]
+            sub_text = "".join(text_chunks[k]).strip()
+            if not sub_lines or not sub_text:
+                continue
+            first, last = by_line.get(sub_lines[0]), by_line.get(sub_lines[-1])
+            window_start = int(_item_get(first, "start_time", cue.start_ms)) if first is not None else cue.start_ms
+            window_end = int(_item_get(last, "end_time", cue.end_ms)) if last is not None else cue.end_ms
+            out.append(
+                StoryCue(
+                    id=f"{cue.id}-{k + 1}",
+                    source_lines=sub_lines,
+                    start_ms=window_start,
+                    end_ms=max(window_start + 1, window_end),
+                    speaker=cue.speaker,
+                    speaker_type=cue.speaker_type,
+                    voice=cue.voice,
+                    zh_text=sub_text,
+                    confidence=cue.confidence,
+                    needs_review=True,
+                    instruction=cue.instruction,
+                )
+            )
+    return out
 
 
 def _enforce_speaker_voice_consistency(cues: list[StoryCue]) -> list[StoryCue]:
